@@ -142,7 +142,7 @@ if (want("pool")) {
     .cwd(ROOT)
     .text();
   const token = native.trim();
-  const verifier = ids.verifierUltrahonk || getEnv(env, "VERIFIER_ULTRAHONK_ID");
+  const verifier = ids.verifierGroth16 || getEnv(env, "VERIFIER_GROTH16_ID") || ids.verifierUltrahonk || getEnv(env, "VERIFIER_ULTRAHONK_ID");
   ids.pool = await deployWasm("pool", wasm("pool", "pool"), [
     "--admin",
     deployer.publicKey,
