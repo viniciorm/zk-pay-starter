@@ -7,6 +7,8 @@ a private payment (deposit → withdraw to a fresh address).
 This is a **learning ground, not a solution**. The hello circuit and both
 on-chain verifiers work out of the box. The mixer is eight marked gaps.
 
+📖 **Arquitectura y Funcionamiento Completo:** Lee [`docs/HOW_IT_WORKS.md`](docs/HOW_IT_WORKS.md) para conocer el flujo detallado de depósito, compromisos Poseidon, árbol Merkle, pruebas Circom + Groth16, nullifiers y verificación en Soroban con transacciones reales en Testnet.
+
 **Testnet and local only. Never mainnet.**
 
 ## Fork → first proof on Stellar
