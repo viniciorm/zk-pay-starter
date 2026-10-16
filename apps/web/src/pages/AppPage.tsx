@@ -164,7 +164,12 @@ export function AppPage() {
         throw new Error(withdrawData.error || "Withdraw transaction failed");
       }
 
-      appendLog(`Withdrawal confirmed! 10 XLM transferred to fresh recipient.`);
+      if (withdrawData.txHash) {
+        appendLog(`Withdrawal confirmed on-chain! Tx: ${withdrawData.txHash}`);
+        appendLog(`Explorer: https://stellar.expert/explorer/testnet/tx/${withdrawData.txHash}`);
+      } else {
+        appendLog(`Withdrawal confirmed! 10 XLM transferred to fresh recipient.`);
+      }
 
       // Trigger AI step
       fetch(`${API_BASE}/pay/ai-step`, {

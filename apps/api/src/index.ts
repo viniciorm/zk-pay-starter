@@ -141,8 +141,8 @@ Bun.serve({
         return json({ ok: false, error: "Missing required proving arguments" }, 400);
       }
       try {
-        const { default: snarkjs } = await import("snarkjs");
-        const { commitment, nullifierHash, hash2, encodeGroth16Proof, encodeG16PublicSignals } = await import("@zk-pay/shared");
+        const snarkjs = await import("snarkjs");
+        const { commitment, nullifierHash, hash2, encodeGroth16Proof, encodeG16PublicSignals, MerkleTree } = await import("@zk-pay/shared");
         const { readFileSync, existsSync } = await import("node:fs");
         const { join } = await import("node:path");
 
@@ -152,7 +152,7 @@ Bun.serve({
         const nfBig = nullifierHash(nullifierBig);
 
         // Compute recipient field
-        const StrKey = (await import("@stellar/stellar-sdk")).StrKey;
+        const { StrKey, scValToNative, xdr } = await import("@stellar/stellar-sdk");
         const rawRecipientBytes = StrKey.decodeEd25519PublicKey(body.recipient);
         const rScalar = 21888242871839275222246405745257275088548364400416034343698204186575808495617n;
         let recipientBig = 0n;
@@ -161,38 +161,61 @@ Bun.serve({
         }
         recipientBig = recipientBig % rScalar;
 
-        // Fetch pool history or build single-leaf Merkle proof
         const leafIndex = Number(body.leafIndex);
-        const elements: string[] = [];
-        const indices: number[] = [];
+        const poolId = process.env.POOL_ID || "CARO7SWGHRXZPIOL4UNEDST4IQIPMQSWYHMDQMYHX3PE62ZLG2NKUVS4";
+        const rpc = process.env.STELLAR_RPC_URL || "https://soroban-testnet.stellar.org";
 
-        // Build Merkle proof up to depth 8 using standard zeros
-        const zeros = [
-          0n,
-          999143419118182190789719420087759536006416175438887644090259239120616999842n,
-          14980991988251259196220252572457852119865910248408998657420540242491656093248n,
-          1176214807425390786026909605553255191834294179344400473262601704285141041180n,
-          14151740698308655829631728108427926105436660161405021204689626156948574188730n,
-          10360647864835849994685023961226074213753733026857476839352936720235377517606n,
-          21820684128527376097103328221666870631627885742407519656832269929949666270685n,
-          20626359489069176161453472093245465691167812948624141121115598687258380899014n,
-        ];
-        
-        let currentHash = cBig;
-        let idx = leafIndex;
-        for (let level = 0; level < 8; level++) {
-          const bit = idx & 1;
-          indices.push(bit);
-          const sibling = zeros[level];
-          elements.push(sibling.toString());
-          currentHash = bit === 0 ? hash2(currentHash, sibling) : hash2(sibling, currentHash);
-          idx >>= 1;
+        // Query past deposit events from Soroban to construct the live Merkle tree
+        let leaves: bigint[] = [];
+        try {
+          const latestRes = await fetch(rpc, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "getLatestLedger" }),
+          });
+          const latest = (await latestRes.json()).result.sequence;
+          const eventsRes = await fetch(rpc, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              jsonrpc: "2.0",
+              id: 2,
+              method: "getEvents",
+              params: {
+                startLedger: latest - 10000,
+                filters: [{ type: "contract", contractIds: [poolId] }],
+              },
+            }),
+          });
+          const events = (await eventsRes.json()).result?.events ?? [];
+          for (const ev of events) {
+            try {
+              const val = xdr.ScVal.fromXDR(ev.value, "base64");
+              const native = scValToNative(val);
+              if (native && native.commitment !== undefined) {
+                leaves[Number(native.index)] = BigInt(native.commitment.toString());
+              }
+            } catch {}
+          }
+        } catch (e) {
+          log(`could not fetch events: ${e}`);
         }
-        const expectedRoot = currentHash;
+
+        // Ensure our leaf is placed at the specified leafIndex
+        leaves[leafIndex] = cBig;
+
+        const tree = new MerkleTree(8);
+        for (let i = 0; i < leaves.length; i++) {
+          tree.insert(leaves[i] ?? 0n);
+        }
+        const proofObj = tree.proof(leafIndex);
+        const expectedRoot = proofObj.root;
+        const elements = proofObj.pathElements.map((x) => x.toString());
+        const indices = proofObj.pathIndices;
 
         const circomDir = join(joinRepo(), "circuits/circom/withdraw");
         const wasmPath = join(circomDir, "withdraw_js/withdraw.wasm");
-        const zkeyPath = join(circomDir, "withdraw.zkey");
+        const zkeyPath = join(joinRepo(), "artifacts/circom/withdraw/withdraw.zkey");
 
         const circuitInput = {
           root: expectedRoot.toString(),
@@ -205,12 +228,40 @@ Bun.serve({
           pathIndices: indices,
         };
 
-        log(`snarkjs calculate witness and prove withdraw...`);
-        const { proof, publicSignals } = await snarkjs.groth16.fullProve(circuitInput, wasmPath, zkeyPath);
+        log(`executing groth16 proof calculation...`);
+        const { writeFileSync, unlinkSync } = await import("node:fs");
+        const tmpInput = join(joinRepo(), `tmp_input_${Date.now()}.json`);
+        const tmpProof = join(joinRepo(), `tmp_proof_${Date.now()}.json`);
+        const tmpPublic = join(joinRepo(), `tmp_public_${Date.now()}.json`);
+
+        writeFileSync(tmpInput, JSON.stringify(circuitInput));
+        const proc = Bun.spawn([
+          "npx", "snarkjs", "groth16", "fullprove",
+          tmpInput,
+          wasmPath,
+          zkeyPath,
+          tmpProof,
+          tmpPublic
+        ], { cwd: joinRepo(), stdout: "pipe", stderr: "pipe" });
+
+        const out = await new Response(proc.stdout).text();
+        const err = await new Response(proc.stderr).text();
+        const code = await proc.exited;
+
+        if (code !== 0) {
+          try { unlinkSync(tmpInput); unlinkSync(tmpProof); unlinkSync(tmpPublic); } catch {}
+          log(`snarkjs fullprove failed: ${err || out}`);
+          return json({ ok: false, error: err || out }, 500);
+        }
+
+        const proof = JSON.parse(readFileSync(tmpProof, "utf-8"));
+        const publicSignals = JSON.parse(readFileSync(tmpPublic, "utf-8"));
+        try { unlinkSync(tmpInput); unlinkSync(tmpProof); unlinkSync(tmpPublic); } catch {}
+
         const proofBytes = encodeGroth16Proof(proof);
         const proofHex = Buffer.from(proofBytes).toString("hex");
 
-        log(`groth16 prove complete. nullifierHash=${nfBig.toString().slice(0, 16)}...`);
+        log(`groth16 prove complete! nullifierHash=${nfBig.toString().slice(0, 16)}...`);
         return json({
           ok: true,
           root: expectedRoot.toString(),
@@ -276,9 +327,11 @@ Bun.serve({
           return json({ ok: false, error: err || out }, 500);
         }
 
-        // Parse tx hash if available
-        log(`withdraw tx succeeded! out=${out.slice(0, 200)}`);
-        return json({ ok: true, out });
+        // Parse tx hash if available from stellar contract invoke output
+        const match = out.match(/[0-9a-fA-F]{64}/);
+        const txHash = match ? match[0] : undefined;
+        log(`withdraw tx succeeded! txHash=${txHash ?? "confirmed"}`);
+        return json({ ok: true, txHash, out });
       } catch (e: any) {
         log(`withdraw submit error=${e?.message ?? e}`);
         return json({ ok: false, error: String(e) }, 500);
@@ -337,7 +390,9 @@ Bun.serve({
 });
 
 function joinRepo() {
-  return new URL("../../..", import.meta.url).pathname;
+  const { fileURLToPath } = require("node:url");
+  const { resolve } = require("node:path");
+  return resolve(fileURLToPath(import.meta.url), "../../../..");
 }
 
 log(`api listening on http://127.0.0.1:${PORT}`);
