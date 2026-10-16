@@ -18,6 +18,8 @@ interface SavedNote {
   timestamp: string;
 }
 
+const API_BASE = (import.meta.env.VITE_API_URL as string) || (window.location.hostname.includes("vercel.app") ? "https://arts-officers-reviewer-huge.trycloudflare.com" : "/api");
+
 export function AppPage() {
   const [notes, setNotes] = useState<SavedNote[]>([]);
   const [selectedNote, setSelectedNote] = useState<string>("");
@@ -43,7 +45,7 @@ export function AppPage() {
       appendLog(`Commitment computed: ${com.toString().slice(0, 20)}...`);
       appendLog("Submitting deposit of 10 XLM to Soroban Pool contract...");
 
-      const res = await fetch("/api/pay/deposit", {
+      const res = await fetch(`${API_BASE}/pay/deposit`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
@@ -73,7 +75,7 @@ export function AppPage() {
 
       // Trigger AI Step via OpenRouter
       appendLog("Invoking OpenRouter AI copilot step...");
-      fetch("/api/pay/ai-step", {
+      fetch(`${API_BASE}/pay/ai-step`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
@@ -101,7 +103,7 @@ export function AppPage() {
     setLoading(true);
     appendLog("Requesting fresh funded address from Friendbot...");
     try {
-      const res = await fetch("/api/fund", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
+      const res = await fetch(`${API_BASE}/fund`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
       const data = await res.json();
       if (data.address) {
         setRecipient(data.address);
@@ -127,7 +129,7 @@ export function AppPage() {
       const leafIndex = noteItem?.leafIndex ?? 0;
 
       appendLog("Generating Zero-Knowledge Groth16 withdrawal proof...");
-      const proveRes = await fetch("/api/pay/prove-withdraw", {
+      const proveRes = await fetch(`${API_BASE}/pay/prove-withdraw`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
@@ -146,7 +148,7 @@ export function AppPage() {
       appendLog(`Proof generated successfully! Nullifier hash: ${proveData.nullifierHash.slice(0, 16)}...`);
       appendLog("Submitting withdrawal transaction to Stellar Testnet...");
 
-      const withdrawRes = await fetch("/api/pay/withdraw", {
+      const withdrawRes = await fetch(`${API_BASE}/pay/withdraw`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
@@ -165,7 +167,7 @@ export function AppPage() {
       appendLog(`Withdrawal confirmed! 10 XLM transferred to fresh recipient.`);
 
       // Trigger AI step
-      fetch("/api/pay/ai-step", {
+      fetch(`${API_BASE}/pay/ai-step`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
