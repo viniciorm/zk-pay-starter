@@ -1,0 +1,9 @@
+node_modules/
+target/
+tools/
+ptau/*.ptau
+circuits/build/*.zkey
+circuits/build/witness.wtns
+*.log
+web/.vercel/
+.env

@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Veil · pago privado en Stellar</title>
+<meta name="description" content="Privacy pool con pruebas Groth16 en Stellar testnet: deposita 10 XLM, retira a otra cuenta sin vínculo on-chain.">
+<style>
+  :root{--bg:#0b0d12;--panel:#12161f;--line:#232a38;--text:#e8ecf3;--muted:#8b95a7;--accent:#7cc4ff;--ok:#5fd38d;--bad:#ff7b7b;--mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+  *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:16px/1.55 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+  .wrap{max-width:960px;margin:0 auto;padding:40px 16px 64px}
+  h1{font-size:2.4rem;margin:0 0 8px;letter-spacing:-.02em}h2{font-size:1.25rem;margin:40px 0 12px}
+  .lead{color:var(--muted);font-size:1.1rem;max-width:640px}
+  .pill{display:inline-block;border:1px solid var(--line);border-radius:999px;padding:2px 10px;font-size:.8rem;color:var(--muted);margin-right:6px}
+  .grid{display:grid;gap:12px;grid-template-columns:repeat(auto-fit,minmax(220px,1fr))}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px}
+  .card b{display:block;font-size:.8rem;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px}
+  .num{font-size:1.8rem;font-weight:600}
+  .step{display:flex;gap:14px;align-items:flex-start}.step .n{flex:0 0 32px;height:32px;border-radius:50%;background:var(--accent);color:#06101a;font-weight:700;display:grid;place-items:center}
+  table{width:100%;border-collapse:collapse;font-size:.92rem}td,th{padding:8px 6px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}th{color:var(--muted);font-weight:500}
+  code,.mono{font-family:var(--mono);font-size:.85em}
+  a{color:var(--accent);text-decoration:none}a:hover{text-decoration:underline}
+  .ok{color:var(--ok)}.bad{color:var(--bad)}
+  pre{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px;overflow:auto;font-size:.85rem}
+  .trunc{display:inline-block;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;vertical-align:bottom}
+  footer{margin-top:48px;color:var(--muted);font-size:.9rem}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <span class="pill">Stellar testnet</span><span class="pill">Circom · Groth16 · BN254</span><span class="pill">Soroban</span>
+  <h1>Veil</h1>
+  <p class="lead">Pago privado no rastreable. A deposita 10 XLM en un pool y entrega una nota secreta; C retira esos 10 XLM presentando una prueba de conocimiento cero. Nadie puede vincular on-chain el depósito con el retiro, y la misma nota no se puede usar dos veces.</p>
+
+  <div class="grid" style="margin-top:24px">
+    <div class="card"><b>Depósitos</b><div class="num" id="nDep">…</div></div>
+    <div class="card"><b>Retiros</b><div class="num" id="nWit">…</div></div>
+    <div class="card"><b>XLM en el pool</b><div class="num" id="pool">…</div></div>
+    <div class="card"><b>Contrato</b><a class="mono trunc" id="cid" href="#"></a></div>
+  </div>
+
+  <h2>Cómo funciona</h2>
+  <div class="grid">
+    <div class="card step"><div class="n">1</div><div><strong>Depósito.</strong> Alice genera <code>nullifier</code> y <code>secret</code>, calcula <code>commitment = Poseidon(nullifier, secret)</code> y lo inserta en un Merkle tree on-chain pagando 10 XLM. Guarda la nota off-chain.</div></div>
+    <div class="card step"><div class="n">2</div><div><strong>Retiro.</strong> Carol reconstruye el árbol desde los eventos, genera una prueba Groth16 de que conoce una hoja del árbol, y el contrato la verifica con las host functions BN254 de Soroban. Paga 10 XLM a Dave.</div></div>
+    <div class="card step"><div class="n">3</div><div><strong>Sin doble gasto.</strong> La prueba expone <code>nullifierHash = Poseidon(nullifier)</code>. El contrato lo marca como gastado y rechaza cualquier segundo intento.</div></div>
+  </div>
+
+  <h2>Demo ejecutada en testnet</h2>
+  <table>
+    <tr><th>Paso</th><th>Transacción</th></tr>
+    <tr><td>init (SAC de XLM, 10 XLM)</td><td><a class="mono" target="_blank" href="https://stellar.expert/explorer/testnet/tx/528f08c2890a9af3933586f7bcbdbade60b749b0255d676254f357824bc3c6a9">528f08c2…c3c6a9</a></td></tr>
+    <tr><td>deposit · alice → pool</td><td><a class="mono" target="_blank" href="https://stellar.expert/explorer/testnet/tx/4b1a171b06f72494819c53daeca290a513af76d5f7c776b230c04ffb84cff213">4b1a171b…cff213</a></td></tr>
+    <tr><td>withdraw · carol firma, dave recibe (prueba ZK)</td><td><a class="mono" target="_blank" href="https://stellar.expert/explorer/testnet/tx/188ac2f97bd036eb23db15955ed3db0211d1cd36ad3a6a6aecdb39f748268347">188ac2f9…268347</a></td></tr>
+    <tr><td>withdraw con la misma nota</td><td class="bad">rechazado · <code>Error(Contract, #5) NullifierSpent</code></td></tr>
+  </table>
+
+  <h2>Actividad on-chain <span class="pill" id="status">cargando…</span></h2>
+  <table id="events"><tr><th>Ledger</th><th>Evento</th><th>Dato</th><th>Tx</th></tr></table>
+
+  <h2>Verifícalo tú</h2>
+  <pre>git clone https://github.com/NovaCorpAI/veil && cd veil && npm i
+bash scripts/demo.sh        # deposit (alice) → nota → withdraw (carol → dave) → doble retiro rechazado</pre>
+  <p class="lead" style="font-size:1rem">Lo que había que acertar: Poseidon on-chain idéntico a circomlib (<code>Poseidon(1,2)</code> verificado), y el orden <code>c1‖c0</code> de las coordenadas G2 entre snarkjs y las host functions. Las dos cosas se validaron con tests antes del deploy.</p>
+
+  <footer>Veil · NovaCorp AI · Taller de Privacidad en Blockchain, Tellus Hub, 16 oct 2026 · <a href="https://github.com/NovaCorpAI/veil">código</a></footer>
+</div>
+<script>
+const CID = "CA4D3V4DB6FPXM4K7WAOG4LHOI5L7Q6R2EI4CENKZKQGER5VUG3CL6QQ";
+const START = 5232394, RPC = "https://soroban-testnet.stellar.org";
+const a = document.getElementById("cid"); a.textContent = CID; a.href = "https://stellar.expert/explorer/testnet/contract/" + CID;
+const b64 = (s) => Uint8Array.from(atob(s), c => c.charCodeAt(0));
+const hex = (u8) => [...u8].map(x => x.toString(16).padStart(2, "0")).join("");
+const sym = (name) => { // XDR de ScVal scvSymbol(name) en base64
+  const n = name.length, pad = (4 - n % 4) % 4, buf = new Uint8Array(8 + n + pad); const dv = new DataView(buf.buffer);
+  dv.setUint32(0, 15); dv.setUint32(4, n); for (let i = 0; i < n; i++) buf[8 + i] = name.charCodeAt(i);
+  return btoa(String.fromCharCode(...buf));
+};
+const TOPICS = { [sym("deposit")]: "deposit", [sym("withdraw")]: "withdraw" };
+async function rpc(method, params) {
+  const r = await fetch(RPC, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }) });
+  const j = await r.json(); if (j.error) throw new Error(j.error.message); return j.result;
+}
+(async () => {
+  try {
+    const res = await rpc("getEvents", { startLedger: START, filters: [{ type: "contract", contractIds: [CID] }], pagination: { limit: 1000 } });
+    const tbl = document.getElementById("events"), st = document.getElementById("status"); let dep = 0, wit = 0;
+    for (const ev of res.events) {
+      const kind = TOPICS[ev.topic[0]]; if (!kind) continue;
+      const v = b64(ev.value); // ScVal vec: 12 bytes de cabecera, luego ScVal u256 (4 + 32)
+      const field = hex(v.slice(16, 48));
+      let data;
+      if (kind === "deposit") { dep++; data = `hoja #${new DataView(v.buffer).getUint32(v.length - 4)} · commitment ${field.slice(0, 10)}…`; }
+      else { wit++; data = `nullifierHash ${field.slice(0, 10)}… · gastado`; }
+      const tr = tbl.insertRow();
+      tr.innerHTML = `<td class="mono">${ev.ledger}</td><td class="${kind === "deposit" ? "ok" : ""}">${kind}</td><td>${data}</td><td><a class="mono" target="_blank" href="https://stellar.expert/explorer/testnet/tx/${ev.txHash}">${ev.txHash.slice(0, 8)}…</a></td>`;
+    }
+    nDep.textContent = dep; nWit.textContent = wit; pool.textContent = (dep - wit) * 10;
+    st.textContent = res.events.length ? "en vivo desde el RPC de testnet" : "sin eventos en la ventana de retención del RPC";
+  } catch (e) { const st = document.getElementById("status"); st.textContent = "RPC no disponible: " + e.message; st.className = "pill bad"; }
+})();
+</script>
+</body>
+</html>
