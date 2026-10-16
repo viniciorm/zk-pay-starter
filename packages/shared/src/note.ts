@@ -38,22 +38,12 @@ export function parseNoteFields(nullifier: string | bigint, secret: string | big
   return { nullifier: Fr(parseField(nullifier)), secret: Fr(parseField(secret)) };
 }
 
-/**
- * TODO(GAP-1): note→commitment helper  → docs/lessons/01.md#hints
- * commitment = Poseidon2(nullifier, secret) using packages/shared hash2.
- */
-export function commitment(_note: Note): bigint {
-  throw new Error(
-    "TODO(GAP-1): implement commitment(note) = hash2(nullifier, secret). See docs/lessons/01.md#hints",
-  );
+import { hash2 } from "./poseidon";
+
+export function commitment(note: Note): bigint {
+  return hash2(note.nullifier, note.secret);
 }
 
-/**
- * TODO(GAP-1): nullifierHash helper  → docs/lessons/01.md#hints
- * nullifierHash = Poseidon2(nullifier, DOMAIN_NULLIFIER) with DOMAIN_NULLIFIER = 1.
- */
-export function nullifierHash(_nullifier: bigint): bigint {
-  throw new Error(
-    "TODO(GAP-1): implement nullifierHash(n) = hash2(n, DOMAIN_NULLIFIER). See docs/lessons/01.md#hints",
-  );
+export function nullifierHash(nullifier: bigint): bigint {
+  return hash2(nullifier, DOMAIN_NULLIFIER);
 }
