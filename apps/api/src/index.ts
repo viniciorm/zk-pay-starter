@@ -23,28 +23,50 @@ function json(data: unknown, status = 200) {
   });
 }
 
+const RATE_LIMIT_WINDOW_MS = 60000;
+const MAX_REQUESTS_PER_WINDOW = 30;
+const ipRequests = new Map<string, { count: number; expiresAt: number }>();
+
+function checkRateLimit(ip: string): boolean {
+  const now = Date.now();
+  const record = ipRequests.get(ip);
+  if (!record || record.expiresAt < now) {
+    ipRequests.set(ip, { count: 1, expiresAt: now + RATE_LIMIT_WINDOW_MS });
+    return true;
+  }
+  if (record.count >= MAX_REQUESTS_PER_WINDOW) {
+    return false;
+  }
+  record.count++;
+  return true;
+}
+
 Bun.serve({
   port: PORT,
   hostname: "0.0.0.0",
-  async fetch(req) {
+  async fetch(req, server) {
     const url = new URL(req.url);
     if (req.method === "OPTIONS") return new Response(null, { headers: CORS });
 
-    if (url.pathname === "/health") return json({ ok: true, logs: logs.slice(-20) });
+    const clientIp = req.headers.get("cf-connecting-ip") || req.headers.get("x-forwarded-for") || "local";
+    if (!checkRateLimit(clientIp)) {
+      log(`rate-limit exceeded for ip=${clientIp}`);
+      return json({ error: "Too many requests. Please slow down." }, 429);
+    }
+
+    if (url.pathname === "/health") return json({ ok: true, timestamp: Date.now() });
     if (url.pathname === "/logs") return json({ logs });
 
     if (url.pathname === "/fund" && req.method === "POST") {
       const body = (await req.json().catch(() => ({}))) as { address?: string };
       let address = body.address;
-      let secret: string | undefined;
       if (!address) {
         const kp = Keypair.random();
         address = kp.publicKey();
-        secret = kp.secret();
       }
       const res = await fetch(`https://friendbot.stellar.org?addr=${address}`);
       log(`friendbot ${address} status=${res.status}`);
-      return json({ address, secret, funded: res.ok, status: res.status });
+      return json({ address, funded: res.ok, status: res.status });
     }
 
     if (url.pathname === "/ai/complete" && req.method === "POST") {

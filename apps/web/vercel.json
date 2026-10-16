@@ -1,6 +1,10 @@
 {
   "rewrites": [
     {
+      "source": "/api/:path*",
+      "destination": "https://arts-officers-reviewer-huge.trycloudflare.com/:path*"
+    },
+    {
       "source": "/(.*)",
       "destination": "/index.html"
     }
