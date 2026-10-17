@@ -7,6 +7,7 @@ target/
 .env.local
 deployment.json
 *.wasm
+!apps/web/public/**
 .contract_id
 .stellar/
 .cursor-tmp/

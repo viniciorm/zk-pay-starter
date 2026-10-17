@@ -9,10 +9,14 @@
     "preview": "vite preview --host 0.0.0.0 --port 43121"
   },
   "dependencies": {
+    "@stellar/freighter-api": "^6.0.1",
+    "@stellar/stellar-sdk": "^17.2.1",
+    "@zk-pay/shared": "workspace:*",
+    "buffer": "^6.0.3",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "react-router-dom": "^7.1.1",
-    "@zk-pay/shared": "workspace:*"
+    "snarkjs": "^0.7.6"
   },
   "devDependencies": {
     "@types/react": "^19.0.0",

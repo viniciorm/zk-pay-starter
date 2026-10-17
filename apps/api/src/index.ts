@@ -1,4 +1,4 @@
-import { Keypair, Horizon } from "@stellar/stellar-sdk";
+import { Keypair, Horizon, StrKey } from "@stellar/stellar-sdk";
 import { chat } from "./openrouter";
 
 const PORT = Number(process.env.API_PORT ?? "43122");
@@ -59,13 +59,12 @@ Bun.serve({
 
     if (url.pathname === "/fund" && req.method === "POST") {
       const body = (await req.json().catch(() => ({}))) as { address?: string };
-      let address = body.address;
-      if (!address) {
-        const kp = Keypair.random();
-        address = kp.publicKey();
+      const address = body.address?.trim();
+      if (!address || !StrKey.isValidEd25519PublicKey(address)) {
+        return json({ ok: false, error: "Missing or invalid Stellar public key (must start with G)" }, 400);
       }
       const res = await fetch(`https://friendbot.stellar.org?addr=${address}`);
-      log(`friendbot ${address} status=${res.status}`);
+      log(`friendbot address=${address} status=${res.status}`);
       return json({ address, funded: res.ok, status: res.status });
     }
 
@@ -128,153 +127,16 @@ Bun.serve({
       }
     }
 
-    // GAP-6 / GAP-7: Proving and relaying withdraw requests
-    if (url.pathname === "/pay/prove-withdraw" && req.method === "POST") {
-      const body = (await req.json().catch(() => ({}))) as {
-        secret?: string;
-        nullifier?: string;
-        leafIndex?: number;
-        recipient?: string;
-        fee?: string;
-      };
-      if (!body.secret || !body.nullifier || body.leafIndex === undefined || !body.recipient) {
-        return json({ ok: false, error: "Missing required proving arguments" }, 400);
-      }
-      try {
-        const snarkjs = await import("snarkjs");
-        const { commitment, nullifierHash, hash2, encodeGroth16Proof, encodeG16PublicSignals, MerkleTree } = await import("@zk-pay/shared");
-        const { readFileSync, existsSync } = await import("node:fs");
-        const { join } = await import("node:path");
-
-        const secretBig = BigInt(body.secret);
-        const nullifierBig = BigInt(body.nullifier);
-        const cBig = commitment({ secret: secretBig, nullifier: nullifierBig });
-        const nfBig = nullifierHash(nullifierBig);
-
-        // Compute recipient field
-        const { StrKey, scValToNative, xdr } = await import("@stellar/stellar-sdk");
-        const rawRecipientBytes = StrKey.decodeEd25519PublicKey(body.recipient);
-        const rScalar = 21888242871839275222246405745257275088548364400416034343698204186575808495617n;
-        let recipientBig = 0n;
-        for (let i = 0; i < 32; i++) {
-          recipientBig = (recipientBig << 8n) | BigInt(rawRecipientBytes[i]);
-        }
-        recipientBig = recipientBig % rScalar;
-
-        const leafIndex = Number(body.leafIndex);
-        const poolId = process.env.POOL_ID || "CARO7SWGHRXZPIOL4UNEDST4IQIPMQSWYHMDQMYHX3PE62ZLG2NKUVS4";
-        const rpc = process.env.STELLAR_RPC_URL || "https://soroban-testnet.stellar.org";
-
-        // Query past deposit events from Soroban to construct the live Merkle tree
-        let leaves: bigint[] = [];
-        try {
-          const latestRes = await fetch(rpc, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "getLatestLedger" }),
-          });
-          const latest = (await latestRes.json()).result.sequence;
-          const eventsRes = await fetch(rpc, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              jsonrpc: "2.0",
-              id: 2,
-              method: "getEvents",
-              params: {
-                startLedger: latest - 10000,
-                filters: [{ type: "contract", contractIds: [poolId] }],
-              },
-            }),
-          });
-          const events = (await eventsRes.json()).result?.events ?? [];
-          for (const ev of events) {
-            try {
-              const val = xdr.ScVal.fromXDR(ev.value, "base64");
-              const native = scValToNative(val);
-              if (native && native.commitment !== undefined) {
-                leaves[Number(native.index)] = BigInt(native.commitment.toString());
-              }
-            } catch {}
-          }
-        } catch (e) {
-          log(`could not fetch events: ${e}`);
-        }
-
-        // Ensure our leaf is placed at the specified leafIndex
-        leaves[leafIndex] = cBig;
-
-        const tree = new MerkleTree(8);
-        for (let i = 0; i < leaves.length; i++) {
-          tree.insert(leaves[i] ?? 0n);
-        }
-        const proofObj = tree.proof(leafIndex);
-        const expectedRoot = proofObj.root;
-        const elements = proofObj.pathElements.map((x) => x.toString());
-        const indices = proofObj.pathIndices;
-
-        const circomDir = join(joinRepo(), "circuits/circom/withdraw");
-        const wasmPath = join(circomDir, "withdraw_js/withdraw.wasm");
-        const zkeyPath = join(joinRepo(), "artifacts/circom/withdraw/withdraw.zkey");
-
-        const circuitInput = {
-          root: expectedRoot.toString(),
-          nullifierHash: nfBig.toString(),
-          recipient: recipientBig.toString(),
-          fee: "0",
-          secret: secretBig.toString(),
-          nullifier: nullifierBig.toString(),
-          pathElements: elements,
-          pathIndices: indices,
-        };
-
-        log(`executing groth16 proof calculation...`);
-        const { writeFileSync, unlinkSync } = await import("node:fs");
-        const tmpInput = join(joinRepo(), `tmp_input_${Date.now()}.json`);
-        const tmpProof = join(joinRepo(), `tmp_proof_${Date.now()}.json`);
-        const tmpPublic = join(joinRepo(), `tmp_public_${Date.now()}.json`);
-
-        writeFileSync(tmpInput, JSON.stringify(circuitInput));
-        const proc = Bun.spawn([
-          "npx", "snarkjs", "groth16", "fullprove",
-          tmpInput,
-          wasmPath,
-          zkeyPath,
-          tmpProof,
-          tmpPublic
-        ], { cwd: joinRepo(), stdout: "pipe", stderr: "pipe" });
-
-        const out = await new Response(proc.stdout).text();
-        const err = await new Response(proc.stderr).text();
-        const code = await proc.exited;
-
-        if (code !== 0) {
-          try { unlinkSync(tmpInput); unlinkSync(tmpProof); unlinkSync(tmpPublic); } catch {}
-          log(`snarkjs fullprove failed: ${err || out}`);
-          return json({ ok: false, error: err || out }, 500);
-        }
-
-        const proof = JSON.parse(readFileSync(tmpProof, "utf-8"));
-        const publicSignals = JSON.parse(readFileSync(tmpPublic, "utf-8"));
-        try { unlinkSync(tmpInput); unlinkSync(tmpProof); unlinkSync(tmpPublic); } catch {}
-
-        const proofBytes = encodeGroth16Proof(proof);
-        const proofHex = Buffer.from(proofBytes).toString("hex");
-
-        log(`groth16 prove complete! nullifierHash=${nfBig.toString().slice(0, 16)}...`);
-        return json({
-          ok: true,
-          root: expectedRoot.toString(),
-          nullifierHash: nfBig.toString(),
-          recipientBig: recipientBig.toString(),
-          fee: "0",
-          proofHex,
-          publicSignals,
-        });
-      } catch (e: any) {
-        log(`prove-withdraw error=${e?.message ?? e}`);
-        return json({ ok: false, error: String(e) }, 500);
-      }
+    // Secure and retired prove-withdraw: proof generation is now 100% client-side WebAssembly
+    if (url.pathname === "/pay/prove-withdraw") {
+      log("rejected /pay/prove-withdraw: proving has been migrated client-side");
+      return json(
+        {
+          ok: false,
+          error: "Proof generation has been migrated to client-side WebAssembly. The server does not accept private preimages.",
+        },
+        410
+      );
     }
 
     if (url.pathname === "/pay/withdraw" && req.method === "POST") {
@@ -286,24 +148,67 @@ Bun.serve({
         fee?: string;
       };
       if (!body.proofHex || !body.root || !body.nullifierHash || !body.recipient) {
-        return json({ ok: false, error: "Missing withdraw parameters" }, 400);
+        return json({ ok: false, error: "Missing required withdraw parameters" }, 400);
       }
+      // Strict parameter validations to avoid arbitrary relayer gas burning
+      if (body.proofHex.length !== 512 || !/^[0-9a-fA-F]{512}$/.test(body.proofHex)) {
+        return json({ ok: false, error: "Invalid proofHex format (must be 256 bytes hex)" }, 400);
+      }
+      if (!StrKey.isValidEd25519PublicKey(body.recipient.trim())) {
+        return json({ ok: false, error: "Invalid recipient address" }, 400);
+      }
+      if (!/^\d+$/.test(body.root) || !/^\d+$/.test(body.nullifierHash)) {
+        return json({ ok: false, error: "Invalid root or nullifierHash format" }, 400);
+      }
+
+      const relayerSecret = process.env.RELAYER_SECRET || process.env.DEPLOYER_SECRET;
+      if (!relayerSecret) {
+        log("withdraw rejected: RELAYER_SECRET not set in environment");
+        return json({ ok: false, error: "Relayer not configured on server. Please set RELAYER_SECRET in environment." }, 500);
+      }
+
       try {
+        const poolId = process.env.POOL_ID || "CARO7SWGHRXZPIOL4UNEDST4IQIPMQSWYHMDQMYHX3PE62ZLG2NKUVS4";
+        const rpc = process.env.STELLAR_RPC_URL || "https://soroban-testnet.stellar.org";
+        const passphrase = process.env.STELLAR_NETWORK_PASSPHRASE || "Test SDF Network ; September 2015";
+        const { rpc: sorobanRpc, Contract, nativeToScVal, scValToNative } = await import("@stellar/stellar-sdk");
+        const server = new sorobanRpc.Server(rpc);
+        const contract = new Contract(poolId);
+
+        // Pre-flight check: verify nullifier is not already spent without spending gas
+        try {
+          const simRes = await server.simulateTransaction(
+            new (await import("@stellar/stellar-sdk")).TransactionBuilder(
+              await server.getAccount(Keypair.fromSecret(relayerSecret).publicKey()),
+              { fee: "100", networkPassphrase: passphrase }
+            )
+              .addOperation(
+                contract.call("is_spent", nativeToScVal(BigInt(body.nullifierHash), { type: "u256" }))
+              )
+              .setTimeout(30)
+              .build()
+          );
+          if (simRes.result?.retval && scValToNative(simRes.result.retval) === true) {
+            log(`pre-flight rejected: nullifier ${body.nullifierHash.slice(0, 16)}... already spent`);
+            return json({ ok: false, error: "Nullifier already spent on-chain (double-spend rejected)" }, 400);
+          }
+        } catch (simErr) {
+          log(`pre-flight check warning: ${simErr}`);
+        }
+
         const { join } = await import("node:path");
         const { writeFileSync, unlinkSync } = await import("node:fs");
         const tmpProof = join(joinRepo(), `tmp_proof_${Date.now()}.bin`);
         writeFileSync(tmpProof, Buffer.from(body.proofHex, "hex"));
 
-        const poolId = process.env.POOL_ID || "CARO7SWGHRXZPIOL4UNEDST4IQIPMQSWYHMDQMYHX3PE62ZLG2NKUVS4";
-        const deployerSecret = process.env.DEPLOYER_SECRET || "SAIOLVAPZTBSCKLK3LRY7A5FRVYEGV22VPW5CFSWNIN2GAIRZ4AXSAJZ";
-        const rpc = process.env.STELLAR_RPC_URL || "https://soroban-testnet.stellar.org";
-        const passphrase = process.env.STELLAR_NETWORK_PASSPHRASE || "Test SDF Network ; September 2015";
+        const relayerKp = Keypair.fromSecret(relayerSecret);
+        const relayerAddress = relayerKp.publicKey();
 
-        log(`submitting withdraw tx to pool=${poolId}...`);
+        log(`submitting withdraw tx to pool=${poolId} via relayer=${relayerAddress}...`);
         const proc = Bun.spawn([
           "stellar", "contract", "invoke",
           "--id", poolId,
-          "--source-account", deployerSecret,
+          "--source-account", relayerSecret,
           "--rpc-url", rpc,
           "--network-passphrase", passphrase,
           "--send", "yes",
@@ -312,9 +217,9 @@ Bun.serve({
           "--proof-file-path", tmpProof,
           "--root", body.root,
           "--nullifier_hash", body.nullifierHash,
-          "--recipient", body.recipient,
+          "--recipient", body.recipient.trim(),
           "--fee", body.fee ?? "0",
-          "--relayer", "GB7PUL34WQHQS2UR7YRHIGFQA34WTBGCS7OZU6RDYYHGBKXP5U2SZTMG",
+          "--relayer", relayerAddress,
         ], { stdout: "pipe", stderr: "pipe" });
 
         const out = await new Response(proc.stdout).text();
@@ -327,7 +232,6 @@ Bun.serve({
           return json({ ok: false, error: err || out }, 500);
         }
 
-        // Parse tx hash if available from stellar contract invoke output
         const match = out.match(/[0-9a-fA-F]{64}/);
         const txHash = match ? match[0] : undefined;
         log(`withdraw tx succeeded! txHash=${txHash ?? "confirmed"}`);
@@ -338,49 +242,49 @@ Bun.serve({
       }
     }
 
-    if (url.pathname === "/pay/deposit" && req.method === "POST") {
+    // Secure broadcast endpoint for client-side signed transactions (e.g. deposits)
+    if ((url.pathname === "/pay/broadcast" || url.pathname === "/pay/deposit") && req.method === "POST") {
       const body = (await req.json().catch(() => ({}))) as {
-        commitment?: string;
+        signedTxXdr?: string;
         fromSecret?: string;
       };
-      if (!body.commitment) {
-        return json({ ok: false, error: "Missing commitment" }, 400);
+      if (body.fromSecret) {
+        return json({
+          ok: false,
+          error: "Insecure server-side signing is disabled. Please sign transactions client-side (Freighter or Local Wallet) and submit signedTxXdr.",
+        }, 400);
+      }
+      if (!body.signedTxXdr) {
+        return json({ ok: false, error: "Missing signedTxXdr parameter" }, 400);
       }
       try {
-        const poolId = process.env.POOL_ID || "CARO7SWGHRXZPIOL4UNEDST4IQIPMQSWYHMDQMYHX3PE62ZLG2NKUVS4";
-        const fromSecret = body.fromSecret || process.env.ALICE_SECRET || "SCOQ7NQW26XEFVG7S5PXO36I7ESBT6ZDMZOT5TX66ZUSBLFTBLXVLOWU";
-        const rpc = process.env.STELLAR_RPC_URL || "https://soroban-testnet.stellar.org";
+        const { rpc: sorobanRpc, Transaction, scValToNative } = await import("@stellar/stellar-sdk");
+        const rpcUrl = process.env.STELLAR_RPC_URL || "https://soroban-testnet.stellar.org";
         const passphrase = process.env.STELLAR_NETWORK_PASSPHRASE || "Test SDF Network ; September 2015";
-        const kp = Keypair.fromSecret(fromSecret);
-
-        log(`submitting deposit tx to pool=${poolId} from=${kp.publicKey()}...`);
-        const proc = Bun.spawn([
-          "stellar", "contract", "invoke",
-          "--id", poolId,
-          "--source-account", fromSecret,
-          "--rpc-url", rpc,
-          "--network-passphrase", passphrase,
-          "--send", "yes",
-          "--",
-          "deposit",
-          "--from", kp.publicKey(),
-          "--commitment", body.commitment,
-        ], { stdout: "pipe", stderr: "pipe" });
-
-        const out = await new Response(proc.stdout).text();
-        const err = await new Response(proc.stderr).text();
-        const code = await proc.exited;
-
-        if (code !== 0) {
-          log(`deposit tx failed exit=${code} err=${err}`);
-          return json({ ok: false, error: err || out }, 500);
+        const server = new sorobanRpc.Server(rpcUrl);
+        const tx = new Transaction(body.signedTxXdr, passphrase);
+        const sim = await server.simulateTransaction(tx);
+        if (sorobanRpc.Api.isSimulationError(sim)) {
+          log(`broadcast pre-flight simulation failed`);
+          return json({ ok: false, error: "Transaction simulation failed", details: sim }, 400);
         }
-
-        const leafIndex = parseInt(out.trim()) || 0;
-        log(`deposit tx succeeded! leafIndex=${leafIndex}`);
-        return json({ ok: true, leafIndex, out });
+        const sendRes = await server.sendTransaction(tx);
+        if (sendRes.status === "ERROR") {
+          log(`broadcast error: ${JSON.stringify(sendRes)}`);
+          return json({ ok: false, error: "Transaction rejected by Stellar RPC", details: sendRes }, 400);
+        }
+        log(`broadcast tx submitted hash=${sendRes.hash}`);
+        const pollRes = await server.pollTransaction(sendRes.hash);
+        const leafIndex = pollRes.returnValue ? scValToNative(pollRes.returnValue) : undefined;
+        log(`broadcast tx confirmed status=${pollRes.status} leafIndex=${leafIndex}`);
+        return json({
+          ok: pollRes.status === "SUCCESS",
+          txHash: sendRes.hash,
+          status: pollRes.status,
+          leafIndex,
+        });
       } catch (e: any) {
-        log(`deposit submit error=${e?.message ?? e}`);
+        log(`broadcast submit error=${e?.message ?? e}`);
         return json({ ok: false, error: String(e) }, 500);
       }
     }
